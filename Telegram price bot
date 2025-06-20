@@ -1,0 +1,114 @@
+'''
+Script that sends prices to your telegram user every X period of time. Public market data from yfinance. No premarket/afterhours. 
+'''
+
+import time
+import requests
+import yfinance as yf
+from datetime import datetime
+
+# --- START MAIN INPUTS --- 
+
+## data Telegram // insert your tocken and chatID
+TOKEN = ""
+CHAT_ID = ""
+
+## TIME
+INTERVAL_MINUTES = 5
+
+## tickers
+INDICES = ["^GSPC", "^IXIC", "^DJI"]
+ETFS = ["SPY", "QQQ", "GLD", "TLT", "VOO", "VTI", "BND", "MSTY"]
+STOCKS = ["MSFT", "NVDA", "AAPL", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "BRK-B", "WMT", "JPM", "LLY", "V", "ORCL", "NFLX", "MA", "XOM", "COST", "PG", "JNJ", "HD", "ABBV", "BAC", "PLTR", "TTD"]
+CRYPTO = ["BTC-USD"]
+
+TICKERS = list(set(INDICES + ETFS + STOCKS + CRYPTO))
+
+## ALERTS (OPTIONAL)
+
+ALERT_LEVELS = {
+    #"SPY": {"above": 440, "below": 430},
+    #"QQQ": {"above": 380},
+    #"AAPL": {"below": 170},
+    #"GLD": {"above": 315.5, "below": 308.5},
+}
+
+# --- END MAIN INPUTS ---
+
+
+# Telegram
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, data=payload)
+
+# PRICE & INTERVALS
+def get_current_prices_and_changes(tickers):
+    prices = {}
+    changes = {}
+    data = yf.download(tickers, period="1d", interval="1m", auto_adjust=True)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for ticker in tickers:
+        try:
+            close_data = data['Close'][ticker].dropna()
+            current_price = close_data.iloc[-1]
+            previous_day_close = close_data.iloc[0]
+            daily_change = ((current_price - previous_day_close) / previous_day_close) * 100
+            prices[ticker] = current_price
+            changes[ticker] = daily_change
+        except Exception:
+            prices[ticker] = None
+            changes[ticker] = None
+
+    return prices, changes, timestamp
+
+# price alerts (optional)
+
+def check_price_alerts(prices):
+    alert_msg = ""
+    for ticker, levels in ALERT_LEVELS.items():
+        price = prices.get(ticker)
+        if price is None:
+            continue
+        if "above" in levels and price > levels["above"]:
+            alert_msg += f"🔔 {ticker} ABOVE {levels['above']} → {price:.2f}\n"
+        if "below" in levels and price < levels["below"]:
+            alert_msg += f"🔻 {ticker} BELOW {levels['below']} → {price:.2f}\n"
+    return alert_msg
+
+
+while True:
+    try:
+        prices, changes, timestamp = get_current_prices_and_changes(TICKERS)
+        message = f"CURRENT PRICES ON ({timestamp}):\n\n"
+
+        def format_section(title, tickers):
+            section = f"{title}:\n"
+            for ticker in tickers:
+                price = prices.get(ticker)
+                change = changes.get(ticker)
+                if price is not None and change is not None:
+                    section += f"{ticker}: {price:.2f} ({change:+.2f}%)\n"
+                else:
+                    section += f"{ticker}: Error\n"
+            return section + "\n"
+
+        message += format_section("Indices", INDICES)
+        message += format_section("ETFs", ETFS)
+        message += format_section("Stocks", STOCKS)
+        message += format_section("Crypto", CRYPTO)
+
+        alert_msg = check_price_alerts(prices)
+        if alert_msg:
+            message += "\n🔎 ALERTS!!!:\n" + alert_msg
+        else:
+            message += "\n🔎 NO ALERTS\n"
+
+        
+        send_telegram_message(message)
+        time.sleep(INTERVAL_MINUTES * 60)
+
+    except Exception as e:
+        print(f"Error general: {e}")
+        time.sleep(60)
