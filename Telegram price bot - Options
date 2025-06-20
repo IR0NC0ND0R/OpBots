@@ -1,5 +1,6 @@
 '''
-Option prices and current PnL to Telegram alerts. Calculation of expected move of the ticker via the ATM straddle. Manual inputs: underlying, strikes, premium of trade, interval, number of expirations. Calling of option prices to yfinance with 15 minutes latency.
+Option prices and current PnL to Telegram alerts. Calculation of expected move of the ticker via the ATM straddle of all selected expirations. Manual inputs: underlying, strikes, premium of trade, interval, number of expirations. Calling of option prices to yfinance with 15 minutes latency.
+Fut Improvement: send the PnL of only the expiration in which the user has a position. 
 '''
 
 import time
