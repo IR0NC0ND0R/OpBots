@@ -1,0 +1,114 @@
+'''
+Option prices and current PnL to Telegram alerts. Calculation of expected move of the ticker via the ATM straddle. Manual inputs: underlying, strikes, premium of trade, interval, number of expirations. Calling of option prices to yfinance with 15 minutes latency.
+'''
+
+import time
+import yfinance as yf
+import requests
+from datetime import datetime
+
+# Telegram data
+TOKEN = ""
+CHAT_ID = ""
+
+# --- START OF MAIN --- #
+
+## INPUTS
+UNDERLYING = "GLD"
+CALL_STRIKE = 320
+PUT_STRIKE = 305
+TRADE_PREMIUM = 0.66
+
+INTERVAL_MINUTES = 16
+Number_expirations = 8 
+
+# --- END OF MAIN --- #
+
+
+# Telegram
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, data=payload)
+
+# Option mid prices
+def get_mid_price(row):
+    bid = row['bid']
+    ask = row['ask']
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+    return None
+
+# Nearest strike to spot - ATM
+def get_nearest_strike(available_strikes, target_strike):
+    return min(available_strikes, key=lambda x: abs(x - target_strike))
+
+# next expirations
+
+while True:
+    try:
+        opt = yf.Ticker(UNDERLYING)
+        spot = opt.history(period="1d")['Close'].iloc[-1]
+        expirations = opt.options[:Number_expirations]  
+
+        message = f"Option Prices of {UNDERLYING} @ {spot:.2f} $\n\n"
+
+        for expiry in expirations:
+            try:
+                calls = opt.option_chain(expiry).calls
+                puts = opt.option_chain(expiry).puts
+
+                call_row = calls[calls['strike'] == CALL_STRIKE]
+                put_row = puts[puts['strike'] == PUT_STRIKE]
+
+                mid_call = get_mid_price(call_row.iloc[0])
+                mid_put = get_mid_price(put_row.iloc[0])
+
+                # Nearest ATM strike
+                all_strikes = sorted(set(calls['strike']).intersection(set(puts['strike'])))
+                nearest_atm_strike = get_nearest_strike(all_strikes, spot)
+
+                atm_call = calls[calls['strike'] == nearest_atm_strike]
+                atm_put = puts[puts['strike'] == nearest_atm_strike]
+
+                if expiry == expirations[0]:
+                    message = f"Option Prices of {UNDERLYING} @ {spot:.2f} $\n\n"
+
+                # date format of expiry in dd-mm-yyyy                
+                formatted_expiry = datetime.strptime(expiry, "%Y-%m-%d").strftime("%d-%m-%Y")
+                net_pl = TRADE_PREMIUM - (mid_call + mid_put)
+                message += f"Unrealized profit/loss: {TRADE_PREMIUM:.2f} - ({mid_call:.2f} + {mid_put:.2f}) = {(TRADE_PREMIUM - (mid_call + mid_put)) * 100:.2f} $ ({(net_pl / TRADE_PREMIUM) * 100:.1f}%)\n"
+                message += f"Expiry: {formatted_expiry} || ATM strike: {nearest_atm_strike}\n"
+
+
+                if not call_row.empty:
+                    #mid_call = get_mid_price(call_row.iloc[0])
+                    message += f"Call {CALL_STRIKE}: Mid = {mid_call:.2f}\n"
+                else:
+                    message += f"Call {CALL_STRIKE}: No data\n"
+
+                if not put_row.empty:
+                    #mid_put = get_mid_price(put_row.iloc[0])
+                    message += f"Put {PUT_STRIKE}: Mid = {mid_put:.2f}\n"
+                else:
+                    message += f"Put {PUT_STRIKE}: No data\n"
+
+                if not atm_call.empty and not atm_put.empty:
+                    mid_atm_call = get_mid_price(atm_call.iloc[0])
+                    mid_atm_put = get_mid_price(atm_put.iloc[0])
+                    expected_move = mid_atm_call + mid_atm_put
+                    lower_bound = nearest_atm_strike - expected_move
+                    upper_bound = nearest_atm_strike + expected_move
+                    message += f"Expected move: {expected_move:.2f} || {lower_bound:.2f} - {upper_bound:.2f}\n"
+
+                message += "\n - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n\n"
+
+            except Exception as e:
+                message += f"{expiry}: Error - {e}\n"
+
+        send_telegram_message(message)
+        time.sleep(INTERVAL_MINUTES * 60)
+
+    except Exception as e:
+        print(f"Error general: {e}")
+        time.sleep(60)
