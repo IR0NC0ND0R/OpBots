@@ -1,0 +1,435 @@
+### improved version of the bot price sender with better message format and able to calculate PnL of classic options strategies. Using dirty data of the yfinance library  
+
+import time
+import yfinance as yf
+import requests
+from datetime import datetime
+
+TOKEN = "XXXXXXX"
+CHAT_ID = "YYYYYYYY"
+
+# --- START OF USER INPUTS --- #
+
+UNDERLYING = "GLD"
+
+POSITION = {
+    "LONG_CALL_STRIKE": None,
+    "LONG_CALL_PREMIUM": None,
+    "SHORT_CALL_STRIKE": None,
+    "SHORT_CALL_PREMIUM": None,
+    
+    "SHORT_PUT_STRIKE": 300,
+    "SHORT_PUT_PREMIUM": 2.1,
+    "LONG_PUT_STRIKE": None,
+    "LONG_PUT_PREMIUM": None,
+}
+STRATEGY_TYPE = "AUTO"
+CONTRACT_NUMBER = 1
+INTERVAL_MINUTES = 16
+
+# EXPIRATION SELECTION OPTIONS:
+EXPIRY_INDEX = None  # Single expirations in order like 0 = nearest expiration, 1 = second expiration, 2 = third and so on
+SPECIFIC_EXPIRY = "2025-07-18"  # "yyyy-mm-dd" format
+SELECTED_INDICES = None  # Example: [0, 2, 4] for 1st, 3rd, and 5th expirations
+NUMBER_EXPIRATIONS = None  # for multiple expirations
+
+# --- END OF USER INPUTS --- #
+
+
+LONG_CALL_STRIKE = POSITION.get("LONG_CALL_STRIKE")
+LONG_CALL_PREMIUM = POSITION.get("LONG_CALL_PREMIUM")
+SHORT_CALL_STRIKE = POSITION.get("SHORT_CALL_STRIKE")
+SHORT_CALL_PREMIUM = POSITION.get("SHORT_CALL_PREMIUM")
+LONG_PUT_STRIKE = POSITION.get("LONG_PUT_STRIKE")
+LONG_PUT_PREMIUM = POSITION.get("LONG_PUT_PREMIUM")
+SHORT_PUT_STRIKE = POSITION.get("SHORT_PUT_STRIKE")
+SHORT_PUT_PREMIUM = POSITION.get("SHORT_PUT_PREMIUM")
+
+
+TRADE_PREMIUM_CALLSIDE = (SHORT_CALL_PREMIUM or 0) - (LONG_CALL_PREMIUM or 0) 
+TRADE_PREMIUM_PUTSIDE = (SHORT_PUT_PREMIUM or 0) - (LONG_PUT_PREMIUM or 0)
+TRADE_PREMIUM = ((TRADE_PREMIUM_CALLSIDE or 0) + (TRADE_PREMIUM_PUTSIDE or 0)) * (CONTRACT_NUMBER or 1) * 100 or 1
+
+
+# --- MESSAGE SECTION --- #
+
+def format_telegram_message(underlying, spot_price, strategy, expirations_data):
+    
+    # --- HEADER --- #
+    message = f"📈 **Ticker: {underlying} @ ${spot_price:.2f}**\n\n"
+    message += f"🎯 Strategy:\n"
+    message += f" - **{strategy}** | Size: {CONTRACT_NUMBER} | Premium: ${TRADE_PREMIUM:.2f}\n"
+    #message += f"🔍 Analyzing {len(expirations_data)} expiration(s)\n"
+    #message += f"⏰ Updated: {datetime.now().strftime('%H:%M:%S')}\n\n"
+    
+    # --- EXPI SECTION --- #
+    for i, exp_data in enumerate(expirations_data):
+        if exp_data.get('error'):
+            message += f"❌ **Expiry {i+1}**: {exp_data['formatted_expiry']} - Error: {exp_data['error']}\n\n"
+            continue
+            
+        # Expi header
+        message += f" - **Expiry {i+1}/{len(expirations_data)}: {exp_data['formatted_expiry']}**\n"
+        
+        # Strat display
+        display_strike = exp_data.get('display_strike', '')
+        if display_strike:
+            #message += f"🎯 Strikes: {display_strike}\n"
+            strike_info = []
+            if SHORT_CALL_STRIKE:
+                call_distance = ((SHORT_CALL_STRIKE - spot_price) / spot_price) * 100
+                strike_info.append(f"{call_distance:+.2f}%")
+            if SHORT_PUT_STRIKE:
+                put_distance = ((SHORT_PUT_STRIKE - spot_price) / spot_price) * 100
+                strike_info.append(f"{put_distance:+.2f}%")
+
+            if strike_info:
+                message += f" -  Strikes: {display_strike} | {' / '.join(strike_info)}\n"
+            else:
+                message += f" -  Strikes: {display_strike}\n"
+        
+        # P&L
+        if exp_data['pnl']:
+            pl_emoji = "🟢" if exp_data['pnl']['net_pnl'] > 0 else "🔴" if exp_data['pnl']['net_pnl'] < 0 else "⚪"
+            message += f"\n{pl_emoji} **P&L**: ${TRADE_PREMIUM:.2f} - ${exp_data['pnl']['current_value']:.2f} = "
+            message += f"${exp_data['pnl']['net_pnl']:.2f} ({exp_data['pnl']['pnl_percent']:.2f}%)\n\n"
+        
+        # Legs
+        if exp_data.get('legs_data'):
+            message += "📋 ** Strat Legs:**\n"
+            for leg in exp_data['legs_data']:
+                iv_str = f"{leg['impliedVolatility']:.1%}" if leg.get('impliedVolatility') else 'N/A'
+                #leg_emoji = "📞" if leg['type'] == 'CALL' else "📱"
+                
+                position_sign = "+" if leg['type'].startswith('L_') else "-"
+                option_type = leg['type'][2:]
+
+                message += f"**{position_sign}{leg['strike']}{leg['type'][2]}**: "
+                message += f"${leg['bid']:.2f}-${leg['ask']:.2f} | Vol: {leg['volume']} | OI: {leg['openInterest']} | IV: {iv_str}\n"
+        
+        # ATM Section
+        if exp_data.get('atm_metrics'): 
+            atm = exp_data['atm_metrics']
+            iv_str = f"{atm['atm_iv']:.1%}" if atm.get('atm_iv') else 'N/A'
+            lower, upper = atm.get('bounds', (None, None))
+            message += f"\n📊 ATM zone\n"
+            message += f" - **{atm['atm_strike']}**: Expected Move ${atm['expected_move']:.2f}\n"
+            if lower is not None and upper is not None:
+                message += f" - **Range**: ${lower:.2f} -- ${upper:.2f} | IV: {iv_str}\n"
+        
+        # Separation between expirations
+        if i < len(expirations_data) - 1:
+            message += "\n" + "─" * 25 + "\n\n"
+    
+    # --- END OF MESSAGE --- #
+    message += f"\n Next update in {INTERVAL_MINUTES} minutes"
+    
+    return message
+
+def format_error_message(underlying, error_msg):
+    """
+    Format error messages for telegram
+    """
+    return f"❌ Error monitoring {underlying}: {error_msg}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+
+# --- END OF MESSAGE SECTION --- #
+
+def send_telegram_message(text: str):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    requests.post(url, data=payload)
+
+def get_mid_price(row):
+    bid, ask = row['bid'], row['ask']
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    return None
+
+def detect_strategy():
+    if STRATEGY_TYPE != "AUTO":
+        return STRATEGY_TYPE
+    has_short_call = SHORT_CALL_STRIKE is not None
+    has_short_put = SHORT_PUT_STRIKE is not None
+    has_long_call = LONG_CALL_STRIKE is not None
+    has_long_put = LONG_PUT_STRIKE is not None
+    if has_short_call and has_short_put and has_long_call and has_long_put:
+        return "IRON BUTTERFLY" if SHORT_CALL_STRIKE == SHORT_PUT_STRIKE else "IRON CONDOR"
+    if has_short_call and has_short_put:
+        return "STRADDLE" if SHORT_CALL_STRIKE == SHORT_PUT_STRIKE else "STRANGLE"
+    if has_short_call:
+        return "SHORT CALL"
+    if has_short_put:
+        return "SHORT PUT"
+    if has_long_call:
+        return "LONG CALL"
+    if has_long_put:
+        return "LONG PUT"
+    return "UNKNOWN"
+
+def select_expirations(all_expirations):
+    
+    # Select expirationS based on USER INPUTS
+    
+    selected_expirations = []
+    
+    # Option 1: Specific expiration date
+    if SPECIFIC_EXPIRY:
+        if SPECIFIC_EXPIRY in all_expirations:
+            selected_expirations = [SPECIFIC_EXPIRY]
+            print(f"Using specific expiration: {SPECIFIC_EXPIRY}")
+        else:
+            print(f"Warning: {SPECIFIC_EXPIRY} not found in available expirations")
+            print(f"Available expirations: {all_expirations}")
+            if NUMBER_EXPIRATIONS:
+                selected_expirations = all_expirations[:NUMBER_EXPIRATIONS]
+    
+    # Option 2: Single expiration by index
+    elif EXPIRY_INDEX is not None:
+        if 0 <= EXPIRY_INDEX < len(all_expirations):
+            selected_expirations = [all_expirations[EXPIRY_INDEX]]
+            print(f"Using expiration at index {EXPIRY_INDEX}: {all_expirations[EXPIRY_INDEX]}")
+        else:
+            print(f"Warning: Index {EXPIRY_INDEX} out of range. Available indices: 0-{len(all_expirations)-1}")
+            if NUMBER_EXPIRATIONS:
+                selected_expirations = all_expirations[:NUMBER_EXPIRATIONS]
+    
+    # Option 3: Multiple expirations by indices
+    elif SELECTED_INDICES:
+        for idx in SELECTED_INDICES:
+            if 0 <= idx < len(all_expirations):
+                selected_expirations.append(all_expirations[idx])
+            else:
+                print(f"Warning: Index {idx} out of range")
+        print(f"Using expirations at indices {SELECTED_INDICES}: {selected_expirations}")
+    
+    # Option 4: MULTIPLE EXPIRATIONS
+    else:
+        if NUMBER_EXPIRATIONS:
+            selected_expirations = all_expirations[:NUMBER_EXPIRATIONS]
+            print(f"Using first {NUMBER_EXPIRATIONS} expirations")
+        else:
+            selected_expirations = [all_expirations[0]] if all_expirations else []
+            print("Using nearest expiration")
+    
+    return selected_expirations
+
+def display_available_expirations(ticker_obj):
+    
+    #Helper function to display all available expirations
+    
+    try:
+        all_exps = ticker_obj.options
+        print(f"\nAvailable expirations for {UNDERLYING}:")
+        for i, exp in enumerate(all_exps):
+            formatted_date = datetime.strptime(exp, "%Y-%m-%d").strftime("%d-%m-%Y")
+            print(f"  Index {i}: {exp} ({formatted_date})")
+        print()
+        return all_exps
+    except Exception as e:
+        print(f"Error fetching expirations: {e}")
+        return []
+
+def get_option_data(df, strike):
+    row = df[df['strike'] == strike]
+    if row.empty:
+        return None
+    r = row.iloc[0]
+    price = get_mid_price(r)
+    return {
+        'strike': strike,
+        'price': price,
+        'bid': r['bid'],
+        'ask': r['ask'],
+        'volume': r.get('volume', 0),
+        'openInterest': r.get('openInterest', 0),
+        'impliedVolatility': r.get('impliedVolatility')
+    }
+'''
+def calculate_pnl(strategy, short_call_data, short_put_data, long_put_data, long_call_data):
+    total = 0.0
+    if strategy in ("CALL", "STRANGLE", "STRADDLE") and short_call_data and short_call_data['price']:
+        total += short_call_data['price']
+    if strategy in ("PUT", "STRANGLE", "STRADDLE") and short_put_data and short_put_data['price']:
+        total += short_put_data['price']
+    current_value_dollars = total * (CONTRACT_NUMBER or 1) * 100
+    net_pnl_dollars = (TRADE_PREMIUM - current_value_dollars)
+    pnl_percent = (net_pnl_dollars / abs(TRADE_PREMIUM) * 100) if TRADE_PREMIUM != 0 else 0
+    return {
+        'current_value': current_value_dollars,
+        'net_pnl': net_pnl_dollars,
+        'pnl_percent': pnl_percent
+    }
+'''
+
+def calculate_pnl(strategy, short_call_data, short_put_data, long_call_data, long_put_data):
+    
+    #Calculate P&L for all strategy types 
+    
+    current_value = 0.0
+    
+    # SHORT positions
+    if short_call_data and short_call_data['price'] is not None:
+        current_value += short_call_data['price']
+    
+    if short_put_data and short_put_data['price'] is not None:
+        current_value += short_put_data['price']
+    
+    # LONG positions
+    if long_call_data and long_call_data['price'] is not None:
+        current_value -= long_call_data['price']
+    
+    if long_put_data and long_put_data['price'] is not None:
+        current_value -= long_put_data['price']
+    
+    current_value_dollars = current_value * (CONTRACT_NUMBER or 1) * 100
+    
+    # Net P&L 
+    net_pnl_dollars = TRADE_PREMIUM - current_value_dollars
+    
+    pnl_percent = (net_pnl_dollars / abs(TRADE_PREMIUM) * 100) if TRADE_PREMIUM != 0 else 0
+    
+    return {
+        'current_value': abs(current_value_dollars),  # Show absolute value for display
+        'net_pnl': net_pnl_dollars,
+        'pnl_percent': pnl_percent
+    }
+
+def compute_atm_metrics(calls, puts, spot):
+    strikes = sorted(set(calls['strike']).intersection(puts['strike']))
+    if not strikes:
+        return {}
+    atm = min(strikes, key=lambda x: abs(x - spot))
+    c = calls[calls['strike'] == atm].iloc[0]
+    p = puts[puts['strike'] == atm].iloc[0]
+    
+    mid_c = get_mid_price(c)
+    mid_p = get_mid_price(p)
+    
+    if mid_c is None or mid_p is None:
+        return {'atm_strike': atm}
+        
+    mid_move = mid_c + mid_p
+    lower, upper = atm - mid_move, atm + mid_move
+    iv = None
+    if 'impliedVolatility' in c and 'impliedVolatility' in p:
+        iv = (c['impliedVolatility'] + p['impliedVolatility']) / 2
+    return {
+        'atm_strike': atm,
+        'expected_move': mid_move,
+        'bounds': (lower, upper),
+        'atm_iv': iv
+    }
+
+def get_display_strike(strategy):
+    # Format of strategy in message
+    display_strikes = {
+        'SHORT CALL': f"-{SHORT_CALL_STRIKE}C" if SHORT_CALL_STRIKE else None,
+        'SHORT PUT': f"-{SHORT_PUT_STRIKE}P" if SHORT_PUT_STRIKE else None,
+        'LONG CALL': f"+{LONG_CALL_STRIKE}C" if LONG_CALL_STRIKE else None,
+        'LONG PUT': f"+{LONG_PUT_STRIKE}P" if LONG_PUT_STRIKE else None,
+        'STRADDLE': f"-{SHORT_CALL_STRIKE}C/-{SHORT_PUT_STRIKE}P" if SHORT_CALL_STRIKE and SHORT_PUT_STRIKE else None,
+        'STRANGLE': f"-{SHORT_CALL_STRIKE}C/-{SHORT_PUT_STRIKE}P" if SHORT_CALL_STRIKE and SHORT_PUT_STRIKE else None,
+        'IRON CONDOR': f"+{LONG_CALL_STRIKE}C/-{SHORT_CALL_STRIKE}C/-{SHORT_PUT_STRIKE}P/+{LONG_PUT_STRIKE}P" if LONG_CALL_STRIKE and SHORT_CALL_STRIKE and SHORT_PUT_STRIKE and LONG_PUT_STRIKE else None,
+        'IRON BUTTERFLY': f"+{LONG_CALL_STRIKE}C/-{SHORT_CALL_STRIKE}C/-{SHORT_PUT_STRIKE}P/+{LONG_PUT_STRIKE}P" if LONG_CALL_STRIKE and SHORT_CALL_STRIKE and SHORT_PUT_STRIKE and LONG_PUT_STRIKE else None
+    }
+    return display_strikes.get(strategy, '')
+
+def process_expiration_data(ticker, expiry, spot, strategy):
+
+    try:
+        calls_df = ticker.option_chain(expiry).calls
+        puts_df = ticker.option_chain(expiry).puts
+
+        formatted_expiry = datetime.strptime(expiry, "%Y-%m-%d").strftime("%d-%m-%Y")
+        
+        # leg data
+        legs = []
+        short_call_data = None
+        short_put_data = None
+        long_call_data = None
+        long_put_data = None
+        
+        if LONG_CALL_STRIKE:
+            long_call_data = get_option_data(calls_df, LONG_CALL_STRIKE)   ####### for long call of IC
+            if long_call_data:
+                long_call_data['type'] = 'L_CALL'
+                legs.append(long_call_data)
+
+        if SHORT_CALL_STRIKE:
+            short_call_data = get_option_data(calls_df, SHORT_CALL_STRIKE)
+            if short_call_data:
+                short_call_data['type'] = 'S_CALL'
+                legs.append(short_call_data)
+        
+        if SHORT_PUT_STRIKE:
+            short_put_data = get_option_data(puts_df, SHORT_PUT_STRIKE)
+            if short_put_data:
+                short_put_data['type'] = 'S_PUT'
+                legs.append(short_put_data)
+
+        if LONG_PUT_STRIKE:
+            long_put_data = get_option_data(puts_df, LONG_PUT_STRIKE)        ###### for long put IC
+            if long_put_data:
+                long_put_data['type'] = 'L_PUT'
+                legs.append(long_put_data)
+
+        # P&L
+        pnl = calculate_pnl(strategy, short_call_data, short_put_data, long_call_data, long_put_data)
+        
+        # ATM
+        atm_metrics = compute_atm_metrics(calls_df, puts_df, spot)
+        
+        # Get display strike
+        display_strike = get_display_strike(strategy)
+
+        return {
+            'expiry': expiry,
+            'formatted_expiry': formatted_expiry,
+            'display_strike': display_strike,
+            'legs_data': legs,
+            'pnl': pnl,
+            'atm_metrics': atm_metrics,
+            'error': None
+        }
+
+    except Exception as e:
+        return {
+            'expiry': expiry,
+            'formatted_expiry': datetime.strptime(expiry, "%Y-%m-%d").strftime("%d-%m-%Y"),
+            'error': str(e)
+        }
+
+if __name__ == '__main__':
+    while True:
+        try:
+            ticker = yf.Ticker(UNDERLYING)
+            spot = ticker.history(period='1d')['Close'].iloc[-1]
+            strategy = detect_strategy()
+            
+            # All aexpirations
+            all_expirations = ticker.options
+            
+            exps = select_expirations(all_expirations)
+            
+            if not exps or strategy == 'UNKNOWN':
+                print("No valid expirations selected or unknown strategy. Skipping this iteration.")
+                time.sleep(60)
+                continue
+
+            # Process data for all expirations
+            expirations_data = []
+            for expiry in exps:
+                exp_data = process_expiration_data(ticker, expiry, spot, strategy)
+                expirations_data.append(exp_data)
+
+            # Generate message
+            message = format_telegram_message(UNDERLYING, spot, strategy, expirations_data)
+            send_telegram_message(message)
+            
+            time.sleep(INTERVAL_MINUTES * 60)
+
+        except Exception as e:
+            error_message = format_error_message(UNDERLYING, str(e))
+            send_telegram_message(error_message)
+            print(f"General Error: {e}")
+            time.sleep(60)
