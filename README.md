@@ -1,1 +1,1 @@
-Just some Python projects 
+Just some Python projects around trading. 
