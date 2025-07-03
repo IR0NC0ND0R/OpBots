@@ -1,0 +1,236 @@
+''' 
+Extraction of all the SP500 tickers via wiki URL and:
+- Calc & generation of some metrics like the Relative Strength Index in daily and weekly timeframes/candles.
+- Matching of RSI to directional/neutral option strategies.
+- Import of company valuation metrics, general data and averages.
+- File export
+'''
+
+import pandas as pd
+import yfinance as yf
+import winsound
+import os
+import time
+import numpy as np
+from datetime import datetime, timedelta
+
+# User Config
+daily_period = "1y"      # daily RSI data
+weekly_period = "3y"     # weekly RSI data  
+Number_of_tickers = None # Number of tickers to analyze (None = all S&P 500 stocks)
+
+print(f"Using daily period: {daily_period}, weekly period: {weekly_period}, analyzing {'all S&P 500' if Number_of_tickers is None else Number_of_tickers} tickers")
+
+# 1 - SPX tickers.
+
+try:
+    sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    sp500_table = pd.read_html(sp500_url)[0]
+    tickers = sp500_table["Symbol"].tolist()[:Number_of_tickers]
+    stock_names = sp500_table["Security"].tolist()[:Number_of_tickers]
+    print(f"Successfully fetched {len(tickers)} S&P 500 tickers")
+except Exception as e:
+    print(f"Failed to fetch S&P 500 tickers: {e}")
+    raise
+
+# 2 - RSI
+def calculate_rsi_wilder(df, period=14):
+    try:
+        if df.empty or len(df) < period:
+            print(f"Insufficient data for RSI calculation: {len(df)} rows")
+            return None
+            
+        delta = df["Close"].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.iloc[-1] if not rsi.empty else None
+    except Exception as e:
+        print(f"Error calculating RSI: {e}")
+        return None
+
+# 3 - Option strats
+
+def determine_strategy(daily_rsi, weekly_rsi):
+    try:
+        # Default strategy
+        strategy = "condors, flies"
+        
+        # Both timeframes oversold
+        if daily_rsi < 30 and weekly_rsi < 30:
+            strategy = "strong bullish: sell puts, bull put spreads"
+        # Both timeframes overbought
+        elif daily_rsi > 70 and weekly_rsi > 70:
+            strategy = "strong bearish: sell calls, bear call spreads"
+        # Daily oversold only
+        elif daily_rsi < 30:
+            strategy = "bullish (daily oversold): sell puts"
+        # Weekly oversold only
+        elif weekly_rsi < 30:
+            strategy = "bullish (weekly oversold): bull put spreads"
+        # Daily overbought only
+        elif daily_rsi > 70:
+            strategy = "bearish (daily overbought): sell calls"
+        # Weekly overbought only
+        elif weekly_rsi > 70:
+            strategy = "bearish (weekly overbought): bear call spreads"
+        
+        return strategy
+    except Exception as e:
+        print(f"Error determining strategy: {e}")
+        return "condors, flies"
+
+# 4 - Indicators
+
+results = []
+successful_count = 0
+failed_count = 0
+
+print(f"Starting analysis of {len(tickers)} tickers...")
+
+for i, ticker in enumerate(tickers):
+    try:
+        print(f"Processing {i+1}/{len(tickers)}: {ticker}")
+        
+        # Create ticker object once and reuse it
+        ticker_obj = yf.Ticker(ticker)
+        
+        # Download DAILY price data
+        df_daily = yf.download(ticker, period=daily_period, interval="1d", progress=False)
+        if df_daily.empty:
+            print(f"No daily price data available for {ticker}")
+            failed_count += 1
+            continue
+
+        # Download WEEKLY price data
+        df_weekly = yf.download(ticker, period=weekly_period, interval="1wk", progress=False)
+        if df_weekly.empty:
+            print(f"No weekly price data available for {ticker}")
+            failed_count += 1
+            continue
+
+        last_close = df_daily["Close"].iloc[-1].item()
+        
+        # Calculate daily RSI
+        daily_rsi = calculate_rsi_wilder(df_daily)
+        if daily_rsi is None:
+            print(f"Could not calculate daily RSI for {ticker}")
+            failed_count += 1
+            continue
+        daily_rsi = daily_rsi.item()
+        
+        # Calculate weekly RSI
+        weekly_rsi = calculate_rsi_wilder(df_weekly)
+        if weekly_rsi is None:
+            print(f"Could not calculate weekly RSI for {ticker}")
+            failed_count += 1
+            continue
+        weekly_rsi = weekly_rsi.item()
+        
+        # Determine strategy based on both RSI values
+        strategy = determine_strategy(daily_rsi, weekly_rsi)
+
+        # Get stock info from the same ticker object
+        try:
+            stock_info = ticker_obj.info
+            market_cap = stock_info.get('marketCap', "N/A")
+            PE_ratio = stock_info.get('trailingPE', "N/A")
+            EPS = stock_info.get('trailingEps', "N/A")
+            Sector = stock_info.get('sector', "N/A")
+            Industry = stock_info.get('industry', "N/A")
+        except Exception as e:
+            print(f"Error getting stock info for {ticker}: {e}")
+            market_cap = PE_ratio = EPS = "N/A"
+            Sector = Industry = "N/A"
+
+        # Get earnings date from the same ticker object
+        earnings_date = None
+        try:
+            calendar = ticker_obj.calendar
+            if isinstance(calendar, pd.DataFrame) and "Earnings Date" in calendar.index:
+                earnings_date = pd.to_datetime(calendar.loc["Earnings Date"][0])
+                if earnings_date.tz is not None:
+                    earnings_date = earnings_date.tz_localize(None)
+        except Exception as e:
+            print(f"Error getting earnings date for {ticker}: {e}")
+
+        # Create row with both daily and weekly RSI
+        row = [ticker, stock_names[i], last_close, daily_rsi, weekly_rsi, market_cap, PE_ratio, EPS, strategy, Sector, Industry, earnings_date]
+        results.append(row)
+        
+        successful_count += 1
+        print(f"{i+1}/{len(tickers)}: {ticker} - OK (Daily RSI: {daily_rsi:.2f}, Weekly RSI: {weekly_rsi:.2f})")
+        time.sleep(0.2)
+        
+    except Exception as e:
+        print(f"Unexpected error processing {ticker}: {e}")
+        failed_count += 1
+        continue
+
+print(f"Analysis complete: {successful_count} successful, {failed_count} failed")
+
+# 5 - export
+
+if not results:
+    print("No data to export - all tickers failed")
+    raise ValueError("No successful ticker analysis")
+
+print(f"Creating DataFrame with {len(results)} records...")
+# Updated columns with both RSI types
+base_cols = ["Ticker", "Name", "Last Close", "RSI_Daily", "RSI_Weekly", "Market Cap", "PE_ratio", "EPS", "Strategy", "Sector", "industry", "Earnings Date"]
+df_results = pd.DataFrame(results, columns=base_cols)
+df_results = df_results.dropna(subset=["RSI_Daily", "RSI_Weekly"])  # Filter based on both RSI values
+
+print(f"Final dataset contains {len(df_results)} records after filtering")
+
+# 6 - Table with averages
+
+df_results["PE_ratio"] = pd.to_numeric(df_results["PE_ratio"], errors="coerce")
+df_results["EPS"] = pd.to_numeric(df_results["EPS"], errors="coerce")
+
+try:
+    
+    if len(df_results) > 0 and not df_results["Sector"].isna().all():
+        sector_avg = df_results.groupby("Sector").agg({
+            "PE_ratio": "mean",
+            "EPS": "mean",
+            "RSI_Daily": "mean",
+            "RSI_Weekly": "mean"
+        }).reset_index()
+        
+        sector_avg.columns = ["Sector", "average of PE_ratio", "average of EPS", "average of RSI_Daily", "average of RSI_Weekly"]
+        print(f"Sector averages calculated for {len(sector_avg)} sectors")
+    else:
+        # Create empty DataFrame with proper columns as fallback
+        sector_avg = pd.DataFrame(columns=["Sector", "average of PE_ratio", "average of EPS", "average of RSI_Daily", "average of RSI_Weekly"])
+        print("No valid sector data found - creating empty sector averages table")
+        
+except Exception as e:
+    print(f"Error calculating sector averages: {e}")
+    # Create empty DataFrame with proper columns as fallback
+    sector_avg = pd.DataFrame(columns=["Sector", "average of PE_ratio", "average of EPS", "average of RSI_Daily", "average of RSI_Weekly"])
+
+# 7 - final export
+
+try:
+    with pd.ExcelWriter("SP500_RSI.xlsx", engine="openpyxl") as writer:
+        df_results.to_excel(writer, sheet_name="Results", index=False)
+        if not sector_avg.empty:
+            sector_avg.to_excel(writer, sheet_name="Results", index=False, startcol=12, startrow=0)  # Column M (12th index)
+            print("Sector averages exported to Excel")
+        else:
+            print("No sector averages to export")
+    
+    print("Excel file created successfully")
+    winsound.PlaySound("query_completed.wav", winsound.SND_FILENAME)
+    
+except Exception as e:
+    print(f"Error exporting to Excel: {e}")
+    # Still try to play the sound even if Excel export fails
+    try:
+        winsound.PlaySound("query_completed.wav", winsound.SND_FILENAME)
+    except:
+        pass
