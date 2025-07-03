@@ -1,4 +1,4 @@
-### improved version of the bot price sender with better message format and able to calculate PnL of classic options strategies. Using dirty data of the yfinance library  
+### improved version of the bot price sender with better message format and able to calculate PnL of classic options strategies. Using dirty data of the yfinance library
 
 import time
 import yfinance as yf
