@@ -1,0 +1,85 @@
+# Script to fetch stock prices from Yahoo Finance and update a trade tracker excel sheet with tickers in predefined columns (starting in O2) and giving their spot price in column P.
+# The python script needs to be called with a VBA macro coded in the workbook, using CMD.
+
+import yfinance as yf
+import time
+import win32com.client
+import pythoncom
+
+def get_price(ticker):
+    try:
+        return yf.Ticker(ticker).info['regularMarketPrice']
+    except:
+        return "ERROR"
+ #  light blink 
+def blink_cell(cell):
+   l
+    cell.Font.Bold = True
+    time.sleep(0.05)
+    cell.Font.Bold = False
+
+try:
+    pythoncom.CoInitialize()
+
+    excel = win32com.client.GetActiveObject("Excel.Application") # python script applied to the runing excel file with "Trade_tracker" as sheet name. Might be better to apply the script to a set workbook with X name instead of the current excel instance.
+    wb = excel.ActiveWorkbook
+    ws = wb.Sheets("Trade_tracker")
+
+    start_row = 2
+    symbol_col = "O"
+    price_col = "P"
+    max_rows = 10
+
+    
+    # excel.ScreenUpdating = False
+    excel.EnableEvents = False  
+
+    while True:
+        row = start_row
+        while row < start_row + max_rows:
+            symbol = ws.Range(f"{symbol_col}{row}").Value
+            if symbol is None or str(symbol).strip() == "":
+                row += 1
+                continue
+
+            price = get_price(symbol)
+            cell = ws.Range(f"{price_col}{row}")
+            cell.Value = price
+
+            # Optional: blink effect
+            blink_cell(cell) # ← you can comment this out completely if needed
+
+            row += 1
+
+        time.sleep(30) # modify this to make it run every X seconds.
+
+except KeyboardInterrupt:
+    print("Stopped by user.")
+
+finally:
+    import gc
+    import sys
+
+    try:
+        # Reactivate events if possible
+        excel.EnableEvents = True
+    except:
+        pass
+
+    # Release Excel objects cleanly
+    ws = None
+    wb = None
+    excel = None
+
+    # Force garbage collection
+    gc.collect()
+
+    # Force release from COM
+    pythoncom.CoUninitialize()
+
+    # Extra safety: clear any lingering refs in sys.modules
+    for module in ["win32com.client", "pythoncom"]:
+        if module in sys.modules:
+            del sys.modules[module]
+
+
