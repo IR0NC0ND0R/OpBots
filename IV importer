@@ -1,0 +1,195 @@
+# This script collects the ATM implied volatility data for SP500 tickers using yfinance and saves the results into daily Excel files. This data can be used later on (after collecting ~1 year of data) to calculate the IV Rank and IV Percentile.
+
+# Main components:
+# - load_tickers(): Loads SP500 tickers from an Excel file
+# - get_next_X_expirations(): Retrieves the next valid option expirations
+# - get_atm_iv_multi_exp(): Fetches ATM IV for multiple expirations
+# - collect_iv_data(): Runs the main loop to collect IV data for all tickers
+# - run_scheduler(): Schedules the collection to run 3 times per day
+
+# Workflow:
+# 1. At scheduled times, collect_iv_data() is executed.
+# 2. For each ticker:
+#    - Get stock price from 30 minutes ago (to match yfinance option 30-min delay).
+#    - Find the closest ATM strike for calls and puts.
+#    - Calculate ATM IV as the average of ATM call and put IVs.
+# 3. Results are appended to a daily Excel file named "SP500_IV_Data_<DD-MM-YYYY>.xlsx".
+
+
+# Notes:
+# - Uses 30-minute delayed price to sync with options data.
+# - Skips expirations shorter than 7 days.
+# - Limits to the next 12 valid expirations per ticker (overkill).
+# - Sleeps briefly between requests to avoid overloading yfinance.
+# - Default mode is the scheduler; single test run can be enabled manually.
+# ---------------------------------------------------------------------
+
+import yfinance as yf
+import pandas as pd
+from datetime import datetime
+import pytz
+import schedule
+import time
+import os
+import io
+import pygame
+from gtts import gTTS
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# Configuration
+madrid_tz = pytz.timezone('Europe/Madrid')
+TICKER_FILE = "C:\\SP500_companies.xlsx"
+
+# -------------------- Audio --------------------
+def play_tts(text):
+    mp3_fp = io.BytesIO()
+    tts = gTTS(text=text, lang='en')
+    tts.write_to_fp(mp3_fp)
+    mp3_fp.seek(0)
+    pygame.mixer.init()
+    pygame.mixer.music.load(mp3_fp, "mp3")
+    pygame.mixer.music.play()
+
+
+# -------------------- Data helpers --------------------
+def load_tickers():
+    return pd.read_excel(TICKER_FILE)['Symbol'].tolist()
+
+def get_next_X_expirations(ticker_obj):
+    exps = ticker_obj.options
+    today = datetime.now().date()
+    valid_exps = []
+    for exp in exps:
+        exp_date = datetime.strptime(exp, '%Y-%m-%d').date()
+        dte = (exp_date - today).days
+        if dte > 7:
+            valid_exps.append(exp)
+        if len(valid_exps) == 12:
+            break
+    return valid_exps
+
+def get_atm_iv_multi_exp(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        hist_data = stock.history(period="2d", interval="1m")
+        if len(hist_data) < 30:
+            return None
+        price = hist_data['Close'].iloc[-30]
+        expirations = get_next_X_expirations(stock)
+        if not expirations:
+            return None
+
+        results = []
+        for exp in expirations:
+            try:
+                chain = stock.option_chain(exp)
+                calls, puts = chain.calls, chain.puts
+                call_atm = calls.iloc[(calls['strike'] - price).abs().argsort()[:1]]
+                put_atm = puts.iloc[(puts['strike'] - price).abs().argsort()[:1]]
+                if call_atm.empty or put_atm.empty:
+                    continue
+                call_iv_mid = call_atm['impliedVolatility'].iloc[0]
+                put_iv_mid = put_atm['impliedVolatility'].iloc[0]
+                atm_iv = (call_iv_mid + put_iv_mid) / 2
+                dte = (datetime.strptime(exp, '%Y-%m-%d').date() - datetime.now().date()).days
+                results.append({
+                    'ticker': ticker,
+                    'stock_price': round(price, 2),
+                    'expiration': exp,
+                    'dte': dte,
+                    'atm_strike': call_atm['strike'].iloc[0],
+                    'atm_iv': round(atm_iv, 3)
+                })
+            except Exception as e:
+                print(f"Error processing {ticker} exp {exp}: {e}")
+                continue
+        return results if results else None
+    except Exception as e:
+        print(f"Error processing {ticker}: {e}")
+        return None
+
+
+# -------------------- Main collection --------------------
+def collect_iv_data(batch_size=10, max_workers=2):
+    now = datetime.now(madrid_tz)
+    date_str = now.strftime("%d-%m-%Y")
+    time_str = now.strftime("%H:%M")
+
+    play_tts(f"SP500 IV collection started")
+    print(f"Starting SP500 IV collection at {time_str} Madrid time...")
+
+    tickers = load_tickers()
+    results = []
+
+    # Split into batches
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i+batch_size]
+        print(f"Processing batch {i//batch_size+1} ({len(batch)} tickers)...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_ticker = {executor.submit(get_atm_iv_multi_exp, t): t for t in batch}
+            for future in as_completed(future_to_ticker):
+                ticker = future_to_ticker[future]
+                try:
+                    data_list = future.result()
+                    if data_list:
+                        for data in data_list:
+                            data['date'] = date_str
+                            data['time_start'] = time_str
+                            current_time = datetime.now(madrid_tz)
+                            price_time = current_time - pd.Timedelta(minutes=30)
+                            data['time_price'] = price_time.strftime("%H:%M")
+                            results.append(data)
+                except Exception as e:
+                    print(f"Thread error for {ticker}: {e}")
+
+        # Gentle pause between batches
+        time.sleep(5)
+
+    # Save results
+    if results:
+        df = pd.DataFrame(results)
+        filename = f"SP500_IV_Data_{date_str}.xlsx"
+        if os.path.exists(filename):
+            existing_df = pd.read_excel(filename)
+            df = pd.concat([existing_df, df], ignore_index=True)
+
+        # Use context manager to guarantee handle closure
+        with pd.ExcelWriter(filename, engine="openpyxl", mode="w") as writer:
+            df.to_excel(writer, index=False)
+
+        print(f"Saved {len(results)} records to {filename}")
+    play_tts("SP500 IV collection completed")
+
+
+# -------------------- Scheduler --------------------
+runs_done = 0
+max_runs = 3   # stop after 3 executions
+
+def job_wrapper():
+    global runs_done
+    collect_iv_data()
+    runs_done += 1
+
+def run_scheduler():
+    global runs_done
+
+    # Register jobs using the wrapper
+    schedule.every().day.at("16:20").do(job_wrapper)
+    schedule.every().day.at("19:35").do(job_wrapper)
+    schedule.every().day.at("22:20").do(job_wrapper)
+
+    print("SP500 IV Collector scheduled for 16:20, 19:35, and 22:20 Madrid time")
+
+    while runs_done < max_runs:
+        schedule.run_pending()
+        time.sleep(5)
+
+    print("All scheduled runs completed. Exiting.")
+    play_tts("All scheduled SP500 IV collections completed")    
+    time.sleep(5)  # wait for sounds to finish
+
+if __name__ == "__main__":
+    # collect_iv_data()  # run manually
+    run_scheduler()  # run scheduled
